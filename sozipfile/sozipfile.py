@@ -52,6 +52,7 @@ class LargeZipFile(Exception):
 
 error = BadZipfile = BadZipFile      # Pre-3.2 compatibility names
 
+SOZIP_DEFAULT_CHUNK_SIZE = 32768
 
 ZIP64_LIMIT = (1 << 31) - 1
 ZIP_FILECOUNT_LIMIT = (1 << 16) - 1
@@ -1129,7 +1130,7 @@ class ZipExtFile(io.BufferedIOBase):
 
 
 class _ZipWriteFile(io.BufferedIOBase):
-    def __init__(self, zf, zinfo, zip64):
+    def __init__(self, zf, zinfo, zip64, chunk_size=SOZIP_DEFAULT_CHUNK_SIZE):
         self._zinfo = zinfo
         self._zip64 = zip64
         self._zipfile = zf
@@ -1138,6 +1139,12 @@ class _ZipWriteFile(io.BufferedIOBase):
         self._file_size = 0
         self._compress_size = 0
         self._crc = 0
+
+        # Start of SOZip specific changes
+        self._input_data_buffer = b""
+        self._chunk_size = chunk_size
+        self._offsets_in_compressed_stream = []
+        # End of SOZip specific changes
 
     @property
     def _fileobj(self):
@@ -1159,6 +1166,37 @@ class _ZipWriteFile(io.BufferedIOBase):
         self._file_size += nbytes
 
         self._crc = crc32(data, self._crc)
+
+        # Start of SOZip specific changes
+        if self._zinfo.compress_type == ZIP_DEFLATED:
+            offset_in_data = 0
+            len_data = len(data)
+
+            # Accumulate input data into self._input_data_buffer until it
+            # reaches self.chunk_size
+            while len(self._input_data_buffer) + len_data > self._chunk_size:
+                len_to_append = self._chunk_size - len(self._input_data_buffer)
+                self._input_data_buffer += data[offset_in_data:offset_in_data + len_to_append]
+                if self._compress_size > 0:
+                    # Store the ofset of the start of a new compressed chunk
+                    # (except for the first chunk)
+                    self._offsets_in_compressed_stream.append(self._compress_size)
+                compressed_data = self._compressor.compress(self._input_data_buffer)
+                compressed_data += self._compressor.flush(zlib.Z_SYNC_FLUSH)
+                compressed_data += self._compressor.flush(zlib.Z_FULL_FLUSH)
+                self._compress_size += len(compressed_data)
+                self._fileobj.write(compressed_data)
+                self._input_data_buffer = b""
+                offset_in_data += len_to_append
+                len_data -= len_to_append
+
+            if len_data > 0:
+                # Keep track of remaining data
+                self._input_data_buffer += data[offset_in_data:]
+
+            return nbytes
+        # End of SOZip specific changes
+
         if self._compressor:
             data = self._compressor.compress(data)
             self._compress_size += len(data)
@@ -1172,7 +1210,20 @@ class _ZipWriteFile(io.BufferedIOBase):
             super().close()
             # Flush any data from the compressor, and update header info
             if self._compressor:
-                buf = self._compressor.flush()
+                # Start of SOZip specific changes
+                if self._zinfo.compress_type == ZIP_DEFLATED:
+                    if self._compress_size > 0:
+                        # Store the ofset of the start of a new compressed chunk
+                        # (except for the first chunk)
+                        self._offsets_in_compressed_stream.append(self._compress_size)
+                    if self._input_data_buffer:
+                        buf = self._compressor.compress(self._input_data_buffer)
+                        buf += self._compressor.flush()
+                    else:
+                        buf = self._compressor.flush()
+                # End of SOZip specific changes
+                else:
+                    buf = self._compressor.flush()
                 self._compress_size += len(buf)
                 self._fileobj.write(buf)
                 self._zinfo.compress_size = self._compress_size
@@ -1205,6 +1256,42 @@ class _ZipWriteFile(io.BufferedIOBase):
                 self._fileobj.write(self._zinfo.FileHeader(self._zip64))
                 self._fileobj.seek(self._zipfile.start_dir)
 
+                # Start of SOZip specific changes
+                if self._offsets_in_compressed_stream:
+                    # Generates a .sozip.idx file, that has only a local file
+                    # header, but no corresponding central file record.
+
+                    # Create payload of index file
+                    data = struct.pack('<I', 1) # version
+                    data += struct.pack('<I', 0) # to skip
+                    data += struct.pack('<I', self._chunk_size)
+                    offset_size = 4 if max(self._offsets_in_compressed_stream) <= 0xffffffff else 8
+                    data += struct.pack('<I', offset_size)
+                    data += struct.pack('<Q', self._zinfo.file_size)
+                    data += struct.pack('<Q', self._zinfo.compress_size)
+                    for v in self._offsets_in_compressed_stream:
+                        if offset_size == 4:
+                            data += struct.pack('<I', v)
+                        else:
+                            data += struct.pack('<Q', v)
+
+                    # Generate information for local file header
+                    import copy
+                    zinfo_idx = copy.copy(self._zinfo)
+                    zinfo_idx.compress_type = ZIP_STORED
+                    filename_parts = self._zinfo.filename.split('/')
+                    filename_parts[-1] = '.' + filename_parts[-1] + '.sozip.idx'
+                    zinfo_idx.filename = '/'.join(filename_parts)
+                    zinfo_idx.CRC = crc32(data, 0)
+                    zinfo_idx.file_size = len(data)
+                    zinfo_idx.compress_size = len(data)
+
+                    # Write local file header
+                    self._fileobj.write(zinfo_idx.FileHeader(False))
+                    self._fileobj.write(data)
+                    self._zipfile.start_dir = self._fileobj.tell()
+                # End of SOZip specific changes
+
             # Successfully written: Add file to our caches
             self._zipfile.filelist.append(self._zinfo)
             self._zipfile.NameToInfo[self._zinfo.filename] = self._zinfo
@@ -1233,14 +1320,15 @@ class ZipFile:
                    When using ZIP_STORED or ZIP_LZMA this keyword has no effect.
                    When using ZIP_DEFLATED integers 0 through 9 are accepted.
                    When using ZIP_BZIP2 integers 1 through 9 are accepted.
-
+    chunk_size: Chunk size to use for SOZip optimization. Defaults to 3268
     """
 
     fp = None                   # Set here since __del__ checks it
     _windows_illegal_name_trans_table = None
 
     def __init__(self, file, mode="r", compression=ZIP_STORED, allowZip64=True,
-                 compresslevel=None, *, strict_timestamps=True, metadata_encoding=None):
+                 compresslevel=None, *, strict_timestamps=True, metadata_encoding=None,
+                 chunk_size=SOZIP_DEFAULT_CHUNK_SIZE):
         """Open the ZIP file with mode read 'r', write 'w', exclusive create 'x',
         or append 'a'."""
         if mode not in ('r', 'w', 'x', 'a'):
@@ -1260,6 +1348,7 @@ class ZipFile:
         self._comment = b''
         self._strict_timestamps = strict_timestamps
         self.metadata_encoding = metadata_encoding
+        self._chunk_size = chunk_size
 
         # Check that we don't try to write with nonconforming codecs
         if self.metadata_encoding and mode != 'r':
@@ -1544,7 +1633,8 @@ class ZipFile:
             zinfo = self.getinfo(name)
 
         if mode == 'w':
-            return self._open_to_write(zinfo, force_zip64=force_zip64)
+            return self._open_to_write(zinfo, force_zip64=force_zip64,
+                                       chunk_size=self._chunk_size)
 
         if self._writing:
             raise ValueError("Can't read from the ZIP file while there "
@@ -1605,7 +1695,7 @@ class ZipFile:
             zef_file.close()
             raise
 
-    def _open_to_write(self, zinfo, force_zip64=False):
+    def _open_to_write(self, zinfo, force_zip64=False, chunk_size=SOZIP_DEFAULT_CHUNK_SIZE):
         if force_zip64 and not self._allowZip64:
             raise ValueError(
                 "force_zip64 is True, but allowZip64 was False when opening "
@@ -1644,7 +1734,7 @@ class ZipFile:
         self.fp.write(zinfo.FileHeader(zip64))
 
         self._writing = True
-        return _ZipWriteFile(self, zinfo, zip64)
+        return _ZipWriteFile(self, zinfo, zip64, chunk_size)
 
     def extract(self, member, path=None, pwd=None):
         """Extract a member from the archive to the current working directory,
