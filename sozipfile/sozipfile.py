@@ -366,6 +366,7 @@ class ZipInfo (object):
         'compress_size',
         'file_size',
         '_raw_time',
+        'sozip_index',
     )
 
     def __init__(self, filename="NoName", date_time=(1980,1,1,0,0,0)):
@@ -410,6 +411,7 @@ class ZipInfo (object):
         # Other attributes are set by class ZipFile:
         # header_offset         Byte offset to the file header
         # CRC                   CRC-32 of the uncompressed file
+        self.sozip_index = None
 
     def __repr__(self):
         result = ['<%s filename=%r' % (self.__class__.__name__, self.filename)]
@@ -555,6 +557,70 @@ class ZipInfo (object):
     def is_dir(self):
         """Return True if this archive member is a directory."""
         return self.filename[-1] == '/'
+
+    def is_sozip_optimized(self, zipfile):
+        """Return True if this file has a SOZip index."""
+        fp = zipfile.fp
+        cur_pos = fp.tell()
+        fp.seek(self.header_offset + sizeFileHeader + len(self.orig_filename) + len(self.extra) + self.compress_size)
+
+        fheader = fp.read(sizeFileHeader)
+        if len(fheader) != sizeFileHeader:
+            fp.seek(cur_pos)
+            return False
+        fheader = struct.unpack(structFileHeader, fheader)
+        if fheader[_FH_SIGNATURE] != stringFileHeader or \
+           fheader[_FH_COMPRESSION_METHOD] != ZIP_STORED:
+            fp.seek(cur_pos)
+            return False
+        fname = fp.read(fheader[_FH_FILENAME_LENGTH])
+        if fheader[_FH_EXTRA_FIELD_LENGTH]:
+            fp.read(fheader[_FH_EXTRA_FIELD_LENGTH])
+
+        if fheader[_FH_GENERAL_PURPOSE_FLAG_BITS] & _MASK_UTF_FILENAME:
+            # UTF-8 filename
+            idx_fname_str = fname.decode("utf-8")
+        else:
+            idx_fname_str = fname.decode(zipfile.metadata_encoding or "cp437")
+
+        filename_parts = self.filename.split('/')
+        filename_parts[-1] = '.' + filename_parts[-1] + '.sozip.idx'
+        expected_idx_fname_str = '/'.join(filename_parts)
+        if idx_fname_str != expected_idx_fname_str:
+            fp.seek(cur_pos)
+            return False
+
+        version = struct.unpack('<I', fp.read(4))[0]
+        if version != 1:
+            fp.seek(cur_pos)
+            return False
+
+        toSkip = struct.unpack('<I', fp.read(4))[0]
+        chunkSize = struct.unpack('<I', fp.read(4))[0]
+        offsetSize = struct.unpack('<I', fp.read(4))[0]
+        uncompressedSize = struct.unpack('<Q', fp.read(8))[0]
+        compressedSize = struct.unpack('<Q', fp.read(8))[0]
+        if (offsetSize != 4 and offsetSize != 8) or \
+            chunkSize <= 0 or \
+            uncompressedSize != self.file_size or \
+            compressedSize != self.compress_size:
+            fp.seek(cur_pos)
+            return False
+
+        numChunks = (self.file_size - 1) // chunkSize
+        idxFileSize = fheader[_FH_UNCOMPRESSED_SIZE]
+        if idxFileSize != 32 + toSkip + offsetSize * numChunks:
+            fp.seek(cur_pos)
+            return False
+
+        fp.seek(fp.tell() + toSkip)
+        if offsetSize == 4:
+            self.sozip_index = [x for x in struct.unpack('<' + 'I' * numChunks, fp.read(offsetSize * numChunks))]
+        else:
+            self.sozip_index = [x for x in struct.unpack('<' + 'Q' * numChunks, fp.read(offsetSize * numChunks))]
+
+        fp.seek(cur_pos)
+        return True
 
 
 # ZIP encryption uses the CRC32 one-byte primitive for scrambling some
@@ -1535,11 +1601,12 @@ class ZipFile:
 
     def printdir(self, file=None):
         """Print a table of contents for the zip file."""
-        print("%-46s %19s %12s" % ("File Name", "Modified    ", "Size"),
+        print("%-46s %19s %12s    %s" % ("File Name", "Modified    ", "Size", "SOZip optimized ?"),
               file=file)
         for zinfo in self.filelist:
             date = "%d-%02d-%02d %02d:%02d:%02d" % zinfo.date_time[:6]
-            print("%-46s %s %12d" % (zinfo.filename, date, zinfo.file_size),
+            print("%-46s %s %12d    %s" % (zinfo.filename, date, zinfo.file_size, \
+                  "Yes" if zinfo.is_sozip_optimized(self) else ""),
                   file=file)
 
     def testzip(self):
