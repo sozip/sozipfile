@@ -1,6 +1,6 @@
 [project]
 name = "sozipfile"
-version = "0.1.0"
+version = "0.1.1"
 authors = [
   { name="Even Rouault (using code from Python contributors)", email="even.rouault@spatialys.com" },
 ]
@@ -9,7 +9,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Python Software Foundation License",
     "Operating System :: OS Independent",
 ]
 
