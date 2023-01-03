@@ -26,3 +26,8 @@ with zipfile.ZipFile('my.zip', 'r') as myzip:
 ```
 
 Note: use of the SOZip index is not currently implemented in the read side, for now.
+
+Available on [pypi](https://pypi.org/project/sozipfile):
+```shell
+pip install sozipfile
+```

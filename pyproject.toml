@@ -1,0 +1,18 @@
+[project]
+name = "sozipfile"
+version = "0.1.0"
+authors = [
+  { name="Even Rouault (using code from Python contributors)", email="even.rouault@spatialys.com" },
+]
+description = "Fork of Python zipfile module, adding generation of sozip optimization"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/sozip/sozipfile"
+"Bug Tracker" = "https://github.com/sozip/sozipfile/issues"
