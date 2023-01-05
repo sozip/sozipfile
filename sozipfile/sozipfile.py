@@ -1331,15 +1331,12 @@ class _ZipWriteFile(io.BufferedIOBase):
                     data = struct.pack('<I', 1) # version
                     data += struct.pack('<I', 0) # to skip
                     data += struct.pack('<I', self._chunk_size)
-                    offset_size = 4 if max(self._offsets_in_compressed_stream) <= 0xffffffff else 8
+                    offset_size = 8
                     data += struct.pack('<I', offset_size)
                     data += struct.pack('<Q', self._zinfo.file_size)
                     data += struct.pack('<Q', self._zinfo.compress_size)
                     for v in self._offsets_in_compressed_stream:
-                        if offset_size == 4:
-                            data += struct.pack('<I', v)
-                        else:
-                            data += struct.pack('<Q', v)
+                        data += struct.pack('<Q', v)
 
                     # Generate information for local file header
                     import copy
