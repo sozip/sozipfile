@@ -1611,9 +1611,6 @@ class ZipFile:
             total = (total + sizeCentralDir + centdir[_CD_FILENAME_LENGTH]
                      + centdir[_CD_EXTRA_FIELD_LENGTH]
                      + centdir[_CD_COMMENT_LENGTH])
-            if x.compress_type != ZIP_STORED:
-                # If compressed, set sozip attributes if available
-                x.is_sozip_optimized(self)
 
             if self.debug > 2:
                 print("total", total)
@@ -1657,7 +1654,9 @@ class ZipFile:
         if info is None:
             raise KeyError(
                 'There is no item named %r in the archive' % name)
-
+        if info.compress_type != ZIP_STORED and info.sozip_index is None:
+            # If compressed, set sozip attributes if available
+            info.is_sozip_optimized(self)
         return info
 
     def setpassword(self, pwd):
