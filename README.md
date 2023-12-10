@@ -4,7 +4,7 @@ sozipfile is a fork of Python [zipfile](https://docs.python.org/3/library/zipfil
 module, from its implementation in CPython 3.11, which implements the
 [SOZip](https://sozip.org) optimization,
 when writing deflate compressed files whose size exceeds the chunk size (defaults
-to 32768 bytes)
+to 32768 bytes). It also implements efficient seeking within a SOZip file.
 
 Example to generate a SOZip-optimized file:
 
