@@ -367,6 +367,7 @@ class ZipInfo (object):
         'file_size',
         '_raw_time',
         'sozip_index',
+        'chunk_size',
     )
 
     def __init__(self, filename="NoName", date_time=(1980,1,1,0,0,0)):
@@ -412,6 +413,7 @@ class ZipInfo (object):
         # header_offset         Byte offset to the file header
         # CRC                   CRC-32 of the uncompressed file
         self.sozip_index = None
+        self.chunk_size = None
 
     def __repr__(self):
         result = ['<%s filename=%r' % (self.__class__.__name__, self.filename)]
@@ -618,6 +620,7 @@ class ZipInfo (object):
             self.sozip_index = [x for x in struct.unpack('<' + 'I' * numChunks, fp.read(offsetSize * numChunks))]
         else:
             self.sozip_index = [x for x in struct.unpack('<' + 'Q' * numChunks, fp.read(offsetSize * numChunks))]
+        self.chunk_size = chunkSize
 
         fp.seek(cur_pos)
         return True
@@ -915,6 +918,10 @@ class ZipExtFile(io.BufferedIOBase):
                 self._orig_file_size = zipinfo.file_size
                 self._orig_start_crc = self._running_crc
                 self._seekable = True
+                self._sozip_index = zipinfo.sozip_index
+                self._chunk_size = zipinfo.chunk_size
+                # need a flag to disable CRC check when seeked
+                self._ignore_crc = False
         except AttributeError:
             pass
 
@@ -1027,7 +1034,7 @@ class ZipExtFile(io.BufferedIOBase):
 
     def _update_crc(self, newdata):
         # Update the CRC using the given data.
-        if self._expected_crc is None:
+        if self._expected_crc is None or self._ignore_crc:
             # No need to compute the CRC if we don't have a reference value
             return
         self._running_crc = crc32(newdata, self._running_crc)
@@ -1165,6 +1172,28 @@ class ZipExtFile(io.BufferedIOBase):
             # Just move the _offset index if the new position is in the _readbuffer
             self._offset = buff_offset
             read_offset = 0
+        elif self._sozip_index is not None and self._decrypter is None:
+            # Determine chunk index and distance to chunk
+            chunk_index, read_offset = divmod(new_pos, self._chunk_size)
+            if chunk_index > len(self._sozip_index):
+                chunk_index = len(self._sozip_index)
+                read_offset = self._chunk_size
+            # The offset of the first chunk (=0) is not part of the sozip index
+            if chunk_index > 0:
+                chunk_offset = self._sozip_index[chunk_index - 1]
+                # When seeked, do not compute CRC
+                self._ignore_crc = True
+            else:
+                chunk_offset = 0
+                self._ignore_crc = False
+            self._fileobj.seek(self._orig_compress_start + chunk_offset)
+            self._running_crc = self._orig_start_crc
+            self._compress_left = self._orig_compress_size - chunk_offset
+            self._left = self._orig_file_size - chunk_index*self._chunk_size
+            self._readbuffer = b''
+            self._offset = 0
+            self._decompressor = _get_decompressor(self._compress_type)
+            self._eof = False
         elif read_offset < 0:
             # Position is before the current position. Reset the ZipExtFile
             self._fileobj.seek(self._orig_compress_start)
@@ -1625,7 +1654,9 @@ class ZipFile:
         if info is None:
             raise KeyError(
                 'There is no item named %r in the archive' % name)
-
+        if info.compress_type != ZIP_STORED and info.sozip_index is None:
+            # If compressed, set sozip attributes if available
+            info.is_sozip_optimized(self)
         return info
 
     def setpassword(self, pwd):
