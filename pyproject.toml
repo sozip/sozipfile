@@ -1,6 +1,6 @@
 [project]
 name = "sozipfile"
-version = "0.2.0"
+version = "0.3.0"
 authors = [
   { name="Even Rouault (using code from Python contributors)", email="even.rouault@spatialys.com" },
 ]
